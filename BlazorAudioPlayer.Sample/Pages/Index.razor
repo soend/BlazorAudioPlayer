@@ -1,0 +1,310 @@
+﻿@page "/"
+
+@using System.Runtime.CompilerServices
+@using System.Threading
+@using BlazorAudioPlayer
+@using BlazorAudioPlayer.Models
+@using Microsoft.JSInterop
+@using Microsoft.AspNetCore.Components.Web
+@using BlazorSize
+@inject IJSRuntime JsRuntime
+@inject ResizeListener listener
+@implements IDisposable
+<!-- Top Info -->
+<div id="title">
+    <span id="track">@(CurrentTrack?.Id + 1). @CurrentTrack?.Title</span>
+    <div id="timer">@ElapsedTimer.ToString(@"mm\:ss")</div>
+    <div id="duration">@CurrentTrack?.Duration.ToString(@"mm\:ss")</div>
+</div>
+
+<!-- Controls -->
+<div class="controlsOuter">
+    <div class="controlsInner">
+        <div class="@loadingClass" id="loading"></div>
+        <div class="btn @playClass" id="playBtn" @onclick="@(() => Play(CurrentTrack?.Id))"></div>
+        <div class="btn @pauseClass" id="pauseBtn" @onclick="@Pause"></div>
+        <div class="btn" id="prevBtn" @onclick="@Previous"></div>
+        <div class="btn" id="nextBtn" @onclick="@Next"></div>
+    </div>
+    <div class="btn" id="playlistBtn" @onclick="@TogglePlaylist"></div>
+    <div class="btn" id="volumeBtn" @onclick="@ToggleVolume"></div>
+</div>
+
+<!-- Progress -->
+<div id="progress" style="@progressStyle"></div>
+
+<!-- Volume -->
+<div id="volume" class="@volumeClass"
+     @onclick="@ToggleVolume"
+     @onmouseup="@(() => sliderDown = false)"
+     @ontouchend="@(() => sliderDown = false)"
+     @onmousemove="@(e => VolumeSliderMovedMouse(e))"
+     @ontouchmove="@(e => VolumeSliderMovedTouch(e))">
+    <div id="barFull" class="bar" style="@barFullStyle"></div>
+    <div id="barEmpty" class="bar" @onclick="@(e => VolumeSliderClick(e))"></div>
+    <div id="sliderBtn" style="@sliderBtnStyle" @onmousedown="@(() => sliderDown = true)" @ontouchstart="@(() => sliderDown = true)"></div>
+</div>
+
+<!-- Playlist -->
+<div id="playlist" class="@playlistClass" @onclick="@TogglePlaylist">
+    <div id="list">
+        @foreach (var item in Playlist)
+        {
+            <div class="list-song" @onclick="(() => SkipTo(item.Id))">@item.Title</div>
+        }
+    </div>
+</div>
+
+@code
+{
+    BrowserWindowSize browser = new BrowserWindowSize();
+    HowlerJsAudioPlayerInterop HowlerJsAudioPlayerInterop = new HowlerJsAudioPlayerInterop();
+    protected string playlistClass = "displayNone";
+    protected string volumeClass = "displayNone";
+    protected string pauseClass = "displayNone";
+    protected string loadingClass = "displayNone";
+    protected string playClass = "displayBlock";
+    protected string barFullStyle = "width: 90%";
+    protected string sliderBtnStyle = "left: 93.25%";
+    protected string progressStyle = "width: 0%";
+
+    protected bool sliderDown = false;
+
+    private double _volume = 0;
+    protected double Volume
+    {
+        get => _volume;
+        set { _volume = value; SetVolume(value); }
+    }
+    protected TimeSpan ElapsedTimer { get; set; } = TimeSpan.Zero;
+
+    protected PlaylistItem CurrentTrack { get; set; }
+    protected List<PlaylistItem> Playlist = new List<PlaylistItem> {
+        new PlaylistItem(0, "80s Vibe", "https://github.com/goldfire/howler.js/raw/master/examples/player/audio/80s_vibe.mp3"),
+        new PlaylistItem(1, "Rave Digger", "https://github.com/goldfire/howler.js/raw/master/examples/player/audio/rave_digger.mp3"),
+        new PlaylistItem(2, "Running Out", "https://github.com/goldfire/howler.js/raw/master/examples/player/audio/running_out.mp3")
+    };
+
+    protected override void OnInitialized()
+    {
+        HowlerJsAudioPlayerInterop.OnPlay = async (d) => await HandleOnPlayEvent(d);
+        HowlerJsAudioPlayerInterop.OnLoad = async () => await HandleOnLoadEvent();
+        HowlerJsAudioPlayerInterop.OnEnd = async () => await HandleOnEndEvent();
+        HowlerJsAudioPlayerInterop.OnStep = async (d) => await HandleOnStepEvent(d);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await HowlerJsAudioPlayerInterop.CreateAudioPlayer(JsRuntime, Playlist);
+            // Subscribe to the OnResized event. This will do work when the browser is resized.
+            listener.OnResized += WindowResized;
+            // Get current window size
+            browser = await listener.GetBrowserWindowSize();
+        }
+    }
+
+    #region Player functions
+    private async void Play(int? index)
+    {
+        Console.WriteLine($"Play called with id {index}");
+        var trackId = index ?? 0;
+
+        var howlerJsState = await HowlerJsAudioPlayerInterop.Play(JsRuntime, trackId);
+
+        // Update current track name
+        CurrentTrack = Playlist[trackId];
+
+        if (howlerJsState == HowlStateEnum.Loaded)
+        {
+            playClass = "displayNone";
+            pauseClass = "displayBlock";
+        }
+        else
+        {
+            loadingClass = "displayBlock";
+            playClass = "displayNone";
+            pauseClass = "displayNone";
+        }
+        StateHasChanged();
+    }
+
+    private async void Pause()
+    {
+        await HowlerJsAudioPlayerInterop.Pause(JsRuntime);
+
+        // Pause timer
+
+        playClass = "displayBlock";
+        pauseClass = "displayNone";
+        StateHasChanged();
+    }
+
+    private async void Previous()
+    {
+        var prevId = CurrentTrack.Id - 1;
+
+        if (prevId < 0)
+            return;
+
+        SkipTo(prevId);
+    }
+
+    private async void Next()
+    {
+        var nextId = CurrentTrack.Id + 1;
+
+        if (nextId >= Playlist.Count)
+            return;
+
+        SkipTo(nextId);
+    }
+
+    private async void SkipTo(int index)
+    {
+        // Stop current track
+        await HowlerJsAudioPlayerInterop.Stop(JsRuntime, CurrentTrack.Id);
+
+        // Reset progress bar here
+        // ToDO
+
+        // Play new track
+        Play(index);
+    }
+
+    private async void SetVolume(double volume)
+    {
+        await HowlerJsAudioPlayerInterop.Volume(JsRuntime, volume);
+
+        // Dynamically set full volume slider width
+        var barWidth = (volume * 90) / 100;
+        barFullStyle = $"width: {(barWidth * 100)}%";
+        // Dynamically set volume slider button location
+        sliderBtnStyle = $"left: {(browser.Width * barWidth + browser.Width * 0.05 - 25)}px";
+    }
+
+    #endregion
+
+    #region Howler.Js event handlers
+    private async Task HandleOnPlayEvent(double duration)
+    {
+        Console.WriteLine("HandleOnPlayEvent called");
+        CurrentTrack.Duration = TimeSpan.FromSeconds(duration);
+        //ElapsedTimer = TimeSpan.Zero;
+
+        // Show pause button when track is playing
+        pauseClass = "displayBlock";
+        StateHasChanged();
+    }
+
+    private async Task HandleOnStepEvent(double seek)
+    {
+        ElapsedTimer = TimeSpan.FromSeconds(seek);
+
+        // Update progress here
+        progressStyle = $"width: {(seek / CurrentTrack.Duration.TotalSeconds) * 100}%";
+
+        StateHasChanged();
+    }
+
+    private async Task HandleOnLoadEvent()
+    {
+        Console.WriteLine("HandleOnLoadEvent called");
+        loadingClass = "displayNone";
+        StateHasChanged();
+    }
+
+    private async Task HandleOnEndEvent()
+    {
+        Console.WriteLine("HandleOnEndEvent called");
+        // If not last track in playlist lets play next track
+        if (CurrentTrack.Id <= Playlist.Count)
+        {
+            Next();
+        }
+
+        StateHasChanged();
+    }
+    #endregion
+
+    private void TogglePlaylist()
+    {
+        var display = (playlistClass.Split(' ')[0] == "displayBlock") ? "displayNone" : "displayBlock";
+
+        playlistClass = display;
+        playlistClass = (display == "displayBlock") ? $"{playlistClass} fadein" : $"{playlistClass} fadeout";
+    }
+
+    private void ToggleVolume()
+    {
+        var display = (volumeClass.Split(' ')[0] == "displayBlock") ? "displayNone" : "displayBlock";
+
+        volumeClass = display;
+        volumeClass = (display == "displayBlock") ? $"{volumeClass} fadein" : $"{volumeClass} fadeout";
+    }
+
+    private async void ProgressClicked(MouseEventArgs e)
+    {
+        var newPosition = CalculateSeekPosition(e.ClientX);
+        await HowlerJsAudioPlayerInterop.Seek(JsRuntime, newPosition);
+    }
+
+    private void VolumeSliderMovedMouse(MouseEventArgs e)
+    {
+        if (sliderDown)
+        {
+            var newVol = CalculateVolume(e.ClientX);
+            SetVolume(newVol);
+        }
+    }
+
+    private void VolumeSliderMovedTouch(TouchEventArgs e)
+    {
+        if (sliderDown)
+        {
+            var newVol = CalculateVolume(e.Touches[0].ClientX);
+            SetVolume(newVol);
+        }
+    }
+
+    private void VolumeSliderClick(MouseEventArgs e)
+    {
+        var newVol = CalculateVolume(e.ClientX);
+        SetVolume(newVol);
+    }
+
+    private double CalculateSeekPosition(double x)
+    {
+        return x / browser.Width;
+    }
+
+    private double CalculateVolume(double x)
+    {
+        var startX = browser.Width * 0.05;
+        var layerX = x - startX;
+        // barEmpty is set in css with 90% width
+        var barEmptyWidth = (90 * browser.Width) / 100;
+        return Math.Min(1, Math.Max(0, layerX / barEmptyWidth));
+    }
+
+    // This method will be called when the window resizes.
+    // It is ONLY called when the user stops dragging the window's edge. (It is already throttled to protect your app from perf. nightmares)
+    private async void WindowResized(object _, BrowserWindowSize window)
+    {
+        // Get the broser's width / height
+        // We're not making direct use of this in the example, but it is possible to retrive the values from the event arguments.
+        browser = window;
+
+        // We're outside of the component's lifecycle, be sure to let it know it has to re-render.
+        StateHasChanged();
+    }
+
+    void IDisposable.Dispose()
+    {
+        // Always use IDisposable in your component to unsubscribe from the event.
+        // Be a good citizen and leave things how you found them.
+        // This way event handlers aren't called when nobody is listening.
+        listener.OnResized -= WindowResized;
+    }
+}
